@@ -6,7 +6,8 @@ const mem = std.mem;
 pub const Type = enum {
     Null,
     Boolean,
-    Number,
+    Number, // TODO Separate integer type.
+    String,
     Function,
 
     // Internal only:
@@ -14,11 +15,12 @@ pub const Type = enum {
 };
 
 const Value = union(Type) {
-    Null     : void,
-    Boolean  : bool,
-    Number   : f64,
-    Function : *Function,
-    Chunk    : *Chunk,
+    Null: void,
+    Boolean: bool,
+    Number: f64,
+    String: u32,
+    Function: *Function,
+    Chunk: *Chunk,
 };
 
 const StackFrame = struct {
@@ -27,11 +29,11 @@ const StackFrame = struct {
 
 const Opcode = enum(u8) {
     Push, // ( -- const_tbl[n])
-    Pop,  // ( v0 v1 v2 .. vn-1 -- )
-    Add,  // ( a b -- a+b )
-    Sub,  // ( a b -- a-b )
-    Mul,  // ( a b -- a*b )
-    Div,  // ( a b -- a/b )
+    Pop, // ( v0 v1 v2 .. vn-1 -- )
+    Add, // ( a b -- a+b )
+    Sub, // ( a b -- a-b )
+    Mul, // ( a b -- a*b )
+    Div, // ( a b -- a/b )
     Return,
 };
 
@@ -39,6 +41,7 @@ const Token = enum {
     Eof,
     Name,
     NumberLiteral,
+    StringLiteral,
     Plus,
     Minus,
     Star,
@@ -47,15 +50,18 @@ const Token = enum {
     RParen,
 };
 
-const TokenMapping = struct {char: u8, token: Token};
+const TokenMapping = struct {
+    char: u8,
+    token: Token,
+};
 
-const token_mapping = []TokenMapping {
-    TokenMapping {.char = '+', .token = Token.Plus},
-    TokenMapping {.char = '-', .token = Token.Minus},
-    TokenMapping {.char = '*', .token = Token.Star},
-    TokenMapping {.char = '/', .token = Token.Slash},
-    TokenMapping {.char = '(', .token = Token.LParen},
-    TokenMapping {.char = ')', .token = Token.RParen},
+const token_mapping = []TokenMapping{
+    TokenMapping{ .char = '+', .token = Token.Plus },
+    TokenMapping{ .char = '-', .token = Token.Minus },
+    TokenMapping{ .char = '*', .token = Token.Star },
+    TokenMapping{ .char = '/', .token = Token.Slash },
+    TokenMapping{ .char = '(', .token = Token.LParen },
+    TokenMapping{ .char = ')', .token = Token.RParen },
 };
 
 fn isDigit(char: u8) bool {
@@ -72,8 +78,9 @@ fn isAlphanumeric(char: u8) bool {
 
 fn Compiler(comptime ReadError: type) type {
     return struct {
-        const Error = ReadError || mem.Allocator.Error || error {
+        const Error = ReadError || mem.Allocator.Error || error{
             InvalidChar,
+            InvalidEscape,
             TooManyConstants,
             BadExpression,
         };
@@ -109,10 +116,7 @@ fn Compiler(comptime ReadError: type) type {
                     }
                 } else if (self.buffer_char == '#') {
                     try self.readChar();
-                    while (self.buffer_char != 0
-                       and self.buffer_char != '\n'
-                       and self.buffer_char != '\r')
-                    {
+                    while (self.buffer_char != 0 and self.buffer_char != '\n' and self.buffer_char != '\r') {
                         try self.readChar();
                     }
                 } else {
@@ -154,6 +158,29 @@ fn Compiler(comptime ReadError: type) type {
                     try self.buffer.append(self.buffer_char);
                     try self.readChar();
                 }
+            } else if (self.buffer_char == '"') {
+                self.current_token = Token.StringLiteral;
+                self.buffer.len = 0;
+                try self.readChar();
+                while (self.buffer_char != '"') {
+                    if (self.buffer_char == '\\') {
+                        try self.readChar();
+                        const char = switch (self.buffer_char) {
+                            // TODO Hex/Unicode escapes?
+                            '0' => u8(0),
+                            '"' => u8('"'),
+                            't' => u8('\t'),
+                            'n' => u8('\n'),
+                            'r' => u8('\r'),
+                            '\\' => u8('\\'),
+                            else => return error.InvalidEscape,
+                        };
+                        try self.buffer.append(char);
+                    } else {
+                        try self.buffer.append(self.buffer_char);
+                    }
+                }
+                try self.readChar();
             } else {
                 for (token_mapping) |mapping| {
                     if (self.buffer_char == mapping.char) {
@@ -181,7 +208,7 @@ fn Compiler(comptime ReadError: type) type {
                                 else => {},
                             }
                         }
-                        try self.const_table.append(Value {.Number = self.number_value});
+                        try self.const_table.append(Value{ .Number = self.number_value });
                         break :number self.const_table.count() - 1;
                     };
                     if (index > 255) {
@@ -235,9 +262,26 @@ fn Compiler(comptime ReadError: type) type {
     };
 }
 
+// TODO Set up a function to finalize all GC objects.
 const GCHeader = struct {
     next: ?*GCHeader,
     obj_type: Type,
+};
+
+const String = struct {
+    // TODO Mark?
+    string: []u8,
+
+    /// This is a dummy function. `std.HashMap` requires a function that hashes its keys, but
+    /// because the keys are already hashed, this just passes them straight through.
+    fn hash(id: u32) u32 {
+        return id;
+    }
+
+    /// Same with this function.
+    fn eql(a: u32, b: u32) bool {
+        return a == b;
+    }
 };
 
 const Chunk = struct {
@@ -254,23 +298,32 @@ const Function = struct {
 };
 
 pub const State = struct {
+    const StringTable = std.HashMap(u32, String, String.hash, String.eql);
+
     allocator: *mem.Allocator,
     stack: std.ArrayList(Value),
     stack_frames: std.ArrayList(StackFrame),
+    string_table: StringTable,
     first_obj: ?*GCHeader,
 
     pub fn init(allocator: *mem.Allocator) !State {
-        var state = State {
+        var state = State{
             .allocator = allocator,
             .stack = std.ArrayList(Value).init(allocator),
             .stack_frames = std.ArrayList(StackFrame).init(allocator),
+            .string_table = StringTable.init(allocator),
             .first_obj = null,
         };
-        try state.stack_frames.append(StackFrame {.base = 0});
+        try state.stack_frames.append(StackFrame{ .base = 0 });
         return state;
     }
 
     fn deinit(self: *State) void {
+        // TODO
+        //var obj = self.first_obj;
+        //while (obj != null) : (obj = obj.?.next) {
+        //    obj.?.finalize();
+        //}
         self.stack.deinit();
         self.stack_frames.deinit();
     }
@@ -284,69 +337,71 @@ pub const State = struct {
     }
 
     fn pushNull(self: *State) !void {
-        return self.stack.append(Value {.Null = {}});
+        return self.stack.append(Value{ .Null = {} });
     }
 
     fn pushBoolean(self: *State, value: bool) !void {
-        return self.stack.append(Value {.Boolean = value});
+        return self.stack.append(Value{ .Boolean = value });
     }
 
     fn pushNumber(self: *State, value: f64) !void {
-        return self.stack.append(Value {.Number = value});
+        return self.stack.append(Value{ .Number = value });
     }
 
     fn normalizeIndex(self: *State, index: isize) isize {
         return if (index < 0) @intCast(isize, self.stackSize()) + index else index;
     }
 
-    fn _getStackValue(self: *State, index: isize) ?*Value {
+    fn _getStackValue(self: *State, index: isize) *Value {
         var absIndex = self.normalizeIndex(index);
         if (absIndex < 0 or @intCast(usize, absIndex) >= self.stackSize()) {
-            return null;
-        } else {
-            return &self.stack.toSlice()[self._currentFrame().base + @intCast(usize, absIndex)];
+            debug.panic("Nano stack index out of bounds");
         }
+        const i = self._currentFrame().base + @intCast(usize, absIndex);
+        return &self.stack.toSlice()[i];
     }
 
-    fn getType(self: *State, index: isize) ?Type {
-        if (self._getStackValue(index)) |value| {
-            const tag: Type = value.*;
-            return tag;
-        } else {
-            return null;
-        }
+    //fn duplicate(self: *State, index: isize) !void {
+    //    if (_getStackValue
+    //}
+
+    fn getType(self: *State, index: isize) Type {
+        return Type(self._getStackValue(index).*);
     }
 
     fn asBoolean(self: *State, index: isize) bool {
-        if (self._getStackValue(index)) |value| {
-            return switch (value.*) {
-                Type.Null => false,
-                Type.Boolean => |val| val,
-                else => true,
-            };
-        } else {
-            return false;
-        }
+        return switch (self._getStackValue(index).*) {
+            Type.Null => false,
+            Type.Boolean => |val| val,
+            else => true,
+        };
     }
 
     fn getNumber(self: *State, index: isize) ?f64 {
-        if (self._getStackValue(index)) |value| {
-            return switch (value.*) {
-                Type.Number => |num| num,
-                else => null,
-            };
-        } else {
-            return null;
-        }
+        return switch (self._getStackValue(index).*) {
+            Type.Number => |num| num,
+            else => null,
+        };
     }
 
-    fn compile(
-        self               : *State,
-        comptime ReadError : type,
-        input              : *io.InStream(ReadError))
-        Compiler(ReadError).Error!void
-    {
-        var compiler = Compiler(ReadError) {
+    fn pushString(self: *State, string: []const u8) !void {
+        const key = std.hash.Fnv1a_32.hash(string);
+        var handle = try self.string_table.getOrPut(key);
+        if (!handle.found_existing) {
+            handle.kv.value = String{ .string = try mem.dupe(self.allocator, u8, string) };
+        }
+        try self.stack.append(Value{ .String = key });
+    }
+
+    fn getString(self: *State, index: isize) ?[]const u8 {
+        return switch (self._getStackValue(index).*) {
+            Type.String => |id| self.string_table.get(id).?.value.string,
+            else => null,
+        };
+    }
+
+    fn compile(self: *State, comptime ReadError: type, input: *io.InStream(ReadError)) Compiler(ReadError).Error!void {
+        var compiler = Compiler(ReadError){
             .input = input,
             .current_token = Token.Eof,
             .current_line = 1,
@@ -364,8 +419,8 @@ pub const State = struct {
         try compiler.bytecode.append(@enumToInt(Opcode.Return));
 
         var chunk = try self.allocator.create(Chunk);
-        chunk.* = Chunk {
-            .header = GCHeader {
+        chunk.* = Chunk{
+            .header = GCHeader{
                 .next = self.first_obj,
                 .obj_type = Type.Chunk,
             },
@@ -375,8 +430,8 @@ pub const State = struct {
         self.first_obj = &chunk.header;
 
         var function = try self.allocator.create(Function);
-        function.* = Function {
-            .header = GCHeader {
+        function.* = Function{
+            .header = GCHeader{
                 .next = self.first_obj,
                 .obj_type = Type.Function,
             },
@@ -385,12 +440,12 @@ pub const State = struct {
         };
         self.first_obj = &function.header;
 
-        try self.stack.append(Value {.Function = function});
+        try self.stack.append(Value{ .Function = function });
     }
 
     fn call(self: *State) !void { // TODO Arguments.
         debug.assert(self.stackSize() >= 1);
-        try self.stack_frames.append(StackFrame {.base = self.stack.count()});
+        try self.stack_frames.append(StackFrame{ .base = self.stack.count() });
         const value = &self.stack.toSlice()[self.stack.count() - 1];
         if (value.* != Type.Function) {
             return error.TypeMismatch;
@@ -414,9 +469,7 @@ pub const State = struct {
                 },
 
                 Opcode.Add => {
-                    if (self.stack.at(self.stack.count() - 1) != Type.Number
-                     or self.stack.at(self.stack.count() - 2) != Type.Number)
-                    {
+                    if (self.stack.at(self.stack.count() - 1) != Type.Number or self.stack.at(self.stack.count() - 2) != Type.Number) {
                         return error.TypeMismatch;
                     }
                     self.stack.toSlice()[self.stack.count() - 2].Number += self.stack.at(self.stack.count() - 1).Number;
@@ -424,9 +477,7 @@ pub const State = struct {
                 },
 
                 Opcode.Sub => {
-                    if (self.stack.at(self.stack.count() - 1) != Type.Number
-                     or self.stack.at(self.stack.count() - 2) != Type.Number)
-                    {
+                    if (self.stack.at(self.stack.count() - 1) != Type.Number or self.stack.at(self.stack.count() - 2) != Type.Number) {
                         return error.TypeMismatch;
                     }
                     self.stack.toSlice()[self.stack.count() - 2].Number -= self.stack.at(self.stack.count() - 1).Number;
@@ -434,9 +485,7 @@ pub const State = struct {
                 },
 
                 Opcode.Mul => {
-                    if (self.stack.at(self.stack.count() - 1) != Type.Number
-                     or self.stack.at(self.stack.count() - 2) != Type.Number)
-                    {
+                    if (self.stack.at(self.stack.count() - 1) != Type.Number or self.stack.at(self.stack.count() - 2) != Type.Number) {
                         return error.TypeMismatch;
                     }
                     self.stack.toSlice()[self.stack.count() - 2].Number *= self.stack.at(self.stack.count() - 1).Number;
@@ -444,9 +493,7 @@ pub const State = struct {
                 },
 
                 Opcode.Div => {
-                    if (self.stack.at(self.stack.count() - 1) != Type.Number
-                     or self.stack.at(self.stack.count() - 2) != Type.Number)
-                    {
+                    if (self.stack.at(self.stack.count() - 1) != Type.Number or self.stack.at(self.stack.count() - 2) != Type.Number) {
                         return error.TypeMismatch;
                     }
                     self.stack.toSlice()[self.stack.count() - 2].Number /= self.stack.at(self.stack.count() - 1).Number;
@@ -475,17 +522,17 @@ test "Pretty Much Everything" {
 
     state.pushNull() catch unreachable;
     debug.assert(state.stackSize() == 1);
-    debug.assert(state.getType(0).? == Type.Null);
-    debug.assert(state.getType(-1).? == Type.Null);
+    debug.assert(state.getType(0) == Type.Null);
+    debug.assert(state.getType(-1) == Type.Null);
 
     state.pushBoolean(true) catch unreachable;
     debug.assert(state.stackSize() == 2);
-    debug.assert(state.getType(1).? == Type.Boolean);
+    debug.assert(state.getType(1) == Type.Boolean);
     debug.assert(state.asBoolean(-1));
 
     state.pushNumber(3.14159) catch unreachable;
     debug.assert(state.stackSize() == 3);
-    debug.assert(state.getType(2).? == Type.Number);
+    debug.assert(state.getType(2) == Type.Number);
     debug.assert(state.getNumber(-1).? == 3.14159);
 
     var file = std.os.File.openRead("test.nano") catch unreachable;
@@ -493,10 +540,15 @@ test "Pretty Much Everything" {
     var stream = file.inStream();
     state.compile(std.os.File.InStream.Error, &stream.stream) catch unreachable;
     debug.assert(state.stackSize() == 4);
-    debug.assert(state.getType(3).? == Type.Function);
+    debug.assert(state.getType(3) == Type.Function);
 
     state.call() catch unreachable;
     debug.assert(state.stackSize() == 4);
-    debug.assert(state.getType(3).? == Type.Number);
+    debug.assert(state.getType(3) == Type.Number);
     debug.warn("Result = {}\n", state.getNumber(-1).?);
+
+    state.pushString("Hello, world!") catch unreachable;
+    debug.assert(state.stackSize() == 5);
+    debug.assert(state.getType(4) == Type.String);
+    debug.assert(mem.eql(u8, state.getString(-1).?, "Hello, world!"));
 }
