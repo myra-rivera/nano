@@ -42,12 +42,15 @@ const Token = enum {
     Name,
     NumberLiteral,
     StringLiteral,
+
     Plus,
     Minus,
     Star,
     Slash,
     LParen,
     RParen,
+
+    Let,
 };
 
 const TokenMapping = struct {
@@ -63,6 +66,13 @@ const token_mapping = []TokenMapping{
     TokenMapping{ .char = '(', .token = Token.LParen },
     TokenMapping{ .char = ')', .token = Token.RParen },
 };
+
+const KeywordMapping = struct {
+    string: []const u8,
+    token: Token,
+};
+
+const keyword_mapping = []KeywordMapping{KeywordMapping{ .string = "let", .token = Token.Let }};
 
 fn isDigit(char: u8) bool {
     return char >= '0' and char <= '9';
@@ -94,6 +104,29 @@ fn Compiler(comptime ReadError: type) type {
 
         bytecode: std.ArrayList(u8),
         const_table: std.ArrayList(Value),
+
+        fn init(allocator: *mem.Allocator, input: *io.InStream(ReadError)) !@This() {
+            var compiler = @This(){
+                .input = input,
+                .current_token = Token.Eof,
+                .current_line = 1,
+                .buffer_char = 0,
+                .buffer = std.ArrayList(u8).init(allocator),
+                .number_value = 0.0,
+                .bytecode = std.ArrayList(u8).init(allocator),
+                .const_table = std.ArrayList(Value).init(allocator),
+            };
+            errdefer compiler.deinit();
+            try compiler.readChar();
+            try compiler.lex();
+            return compiler;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.buffer.deinit();
+            self.bytecode.deinit();
+            self.const_table.deinit();
+        }
 
         fn readChar(self: *@This()) ReadError!void {
             var buffer: [1]u8 = undefined;
@@ -217,6 +250,11 @@ fn Compiler(comptime ReadError: type) type {
                     try self.bytecode.append(@enumToInt(Opcode.Push));
                     try self.bytecode.append(@intCast(u8, index));
                     try self.lex();
+                },
+
+                Token.StringLiteral => {
+                    // TODO Get string literals working.
+                    unreachable;
                 },
 
                 Token.LParen => {
@@ -401,23 +439,15 @@ pub const State = struct {
     }
 
     fn compile(self: *State, comptime ReadError: type, input: *io.InStream(ReadError)) Compiler(ReadError).Error!void {
-        var compiler = Compiler(ReadError){
-            .input = input,
-            .current_token = Token.Eof,
-            .current_line = 1,
-            .buffer_char = 0,
-            .buffer = std.ArrayList(u8).init(self.allocator),
-            .number_value = 0.0,
-            .bytecode = std.ArrayList(u8).init(self.allocator),
-            .const_table = std.ArrayList(Value).init(self.allocator),
-        };
-        defer compiler.buffer.deinit();
-        // TODO REMEMBER TO DEINIT ALL OF THE DAMN ARRAYS!
-        try compiler.readChar();
-        try compiler.lex();
+        // Create the compiler.
+        var compiler = try Compiler(ReadError).init(self.allocator, input);
+        errdefer compiler.deinit();
+
+        // Run the compiler.
         try compiler.parseExpr();
         try compiler.bytecode.append(@enumToInt(Opcode.Return));
 
+        // Convert the compiled junk into a Chunk object.
         var chunk = try self.allocator.create(Chunk);
         chunk.* = Chunk{
             .header = GCHeader{
@@ -428,6 +458,7 @@ pub const State = struct {
             .const_table = compiler.const_table.toOwnedSlice(),
         };
         self.first_obj = &chunk.header;
+        compiler.buffer.deinit();
 
         var function = try self.allocator.create(Function);
         function.* = Function{
