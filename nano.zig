@@ -11,6 +11,7 @@ pub const Type = enum {
     Function,
 
     // Internal only:
+    // TODO Separate this out into a different enum.
     Chunk,
 };
 
@@ -23,6 +24,7 @@ const Value = union(Type) {
     Chunk: *Chunk,
 };
 
+// TODO Move.
 const StackFrame = struct {
     base: usize,
 };
@@ -58,6 +60,7 @@ const TokenMapping = struct {
     token: Token,
 };
 
+/// Maps single characters to their token ID.
 const token_mapping = []TokenMapping{
     TokenMapping{ .char = '+', .token = Token.Plus },
     TokenMapping{ .char = '-', .token = Token.Minus },
@@ -72,6 +75,7 @@ const KeywordMapping = struct {
     token: Token,
 };
 
+/// Like token_mapping, but for full keywords.
 const keyword_mapping = []KeywordMapping{KeywordMapping{ .string = "let", .token = Token.Let }};
 
 fn isDigit(char: u8) bool {
@@ -128,6 +132,8 @@ fn Compiler(comptime ReadError: type) type {
             self.const_table.deinit();
         }
 
+        /// Reads a single character from the input and puts it in self.buffer_char, or it puts 0 if
+        /// at the end of the input.
         fn readChar(self: *@This()) ReadError!void {
             var buffer: [1]u8 = undefined;
             const count = try self.input.read(buffer[0..]);
@@ -135,19 +141,24 @@ fn Compiler(comptime ReadError: type) type {
         }
 
         fn lex(self: *@This()) Error!void {
+            // Discard ignored stuff.
             discardWhitespace: while (true) {
                 if (self.buffer_char == ' ' or self.buffer_char == '\t') {
+                    // Plain whitespace.
                     try self.readChar();
                 } else if (self.buffer_char == '\n') {
+                    // Unix-style line breaks.
                     self.current_line += 1;
                     try self.readChar();
                 } else if (self.buffer_char == '\r') {
+                    // Windows and Mac Classic-style line breaks.
                     self.current_line += 1;
                     try self.readChar();
                     if (self.buffer_char == '\n') {
                         try self.readChar();
                     }
                 } else if (self.buffer_char == '#') {
+                    // Comments.
                     try self.readChar();
                     while (self.buffer_char != 0 and self.buffer_char != '\n' and self.buffer_char != '\r') {
                         try self.readChar();
@@ -254,6 +265,21 @@ fn Compiler(comptime ReadError: type) type {
 
                 Token.StringLiteral => {
                     // TODO Get string literals working.
+                    //const index = string: {
+                    //    for (self.const_table.toSlice()) |constant, i| {
+                    //        switch (constant) {
+                    //            Type.String => |id| {
+                    //                // TODO Guess we'd better intern this stuff at some point.
+                    //                if (mem.eql(u8, id == self.???) {
+                    //                    break :string i;
+                    //                }
+                    //            },
+
+                    //            else => {},
+                    //        }
+                    //    }
+                    //    try self.const_table.append(Value{ .Number//TODO TODO TODO TODO TODO TODO
+                    //};
                     unreachable;
                 },
 
@@ -316,7 +342,7 @@ const String = struct {
         return id;
     }
 
-    /// Same with this function.
+    /// Same with this thing.
     fn eql(a: u32, b: u32) bool {
         return a == b;
     }
@@ -582,4 +608,7 @@ test "Pretty Much Everything" {
     debug.assert(state.stackSize() == 5);
     debug.assert(state.getType(4) == Type.String);
     debug.assert(mem.eql(u8, state.getString(-1).?, "Hello, world!"));
+    state.pushString("Hello, world!") catch unreachable;
+    state.pushString("Hello, world!") catch unreachable;
+    debug.assert(state.string_table.size == 1);
 }
